@@ -20,6 +20,7 @@ import { ProgrammeParamNotice } from '../components/programme/ProgrammeParamNoti
 import { ErrorPanel, PendingState, TransactionOutcome } from '../components/state/AsyncStates';
 import { AttestationRevoke } from '../components/verifier/AttestationRevoke';
 import { FIXTURE_REVIEW_APPLICANTS } from '../fixtures/reviewFixtures';
+import { fetchProgrammes } from '../lib/indexer';
 import {
   FIXTURE_MY_ATTESTATIONS,
   FIXTURE_VERIFIER_QUEUE,
@@ -376,6 +377,49 @@ export const VerifierDashboard = () => {
               </div>
             ))}
           </div>
+
+          <section aria-labelledby="my-programmes">
+            <h2 id="my-programmes" className="verifier-page__section-title">
+              Your programmes
+            </h2>
+            {myProgrammes === null ? (
+              <p className="typo-text text-muted">Checking your roles across known programmes…</p>
+            ) : (
+              <div className="verifier-page__grid">
+                <div>
+                  <h3>Programmes you verify for</h3>
+                  {verifierProgrammes.length === 0 ? (
+                    <p className="typo-text text-muted">None found among known programmes.</p>
+                  ) : (
+                    <ul>
+                      {verifierProgrammes.map((p) => (
+                        <li key={p.id}>{p.name ?? truncateAddress(p.id)} — {p.phase ?? 'unknown phase'}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+                <div>
+                  <h3>Programmes where you can vote</h3>
+                  {reviewerProgrammes.length === 0 ? (
+                    <p className="typo-text text-muted">None found among known programmes.</p>
+                  ) : (
+                    <ul>
+                      {reviewerProgrammes.map((p) => (
+                        <li key={p.id}>
+                          {p.name ?? truncateAddress(p.id)} — {p.phase ?? 'unknown phase'}
+                          {p.phase === 'Review' && (
+                            <button type="button" onClick={() => setSelectedApplicant('')}>
+                              Review here
+                            </button>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            )}
+          </section>
 
           <div className="verifier-page__grid">
             <section aria-labelledby="reviewer-vote">

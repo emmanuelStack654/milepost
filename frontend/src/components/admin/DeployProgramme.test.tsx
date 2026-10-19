@@ -1,106 +1,198 @@
-import { describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
-import { Buffer } from 'buffer';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DeployProgramme } from './DeployProgramme';
 
-// Issue #411 — the schema UID must be confirmed against attest before the
-// user can continue. These tests cover the found, not-found and malformed
-// cases through the real form.
-
-const ADMIN = `G${'A'.repeat(55)}`;
-const UID = 'ab'.repeat(32);
-
-const SCHEMA = {
-  authority: `G${'B'.repeat(55)}`,
-  definition: 'Requires a verified clinic visit',
-  predecessor: null,
-  restricted: false,
-  revocable: true,
-  uid: Buffer.from(UID, 'hex'),
-};
-
-const state = vi.hoisted(() => {
-  const holder = {
-    getSchema: vi.fn(),
-    attest: {} as { get_schema: (...args: unknown[]) => unknown },
-    registry: { create: () => undefined },
-  };
-  // Stable client object across renders, like the real memoized provider.
-  holder.attest = { get_schema: (...args: unknown[]) => holder.getSchema(...args) };
-  return holder;
-});
+const mocks = vi.hoisted(() => ({
+  address: 'G' + 'A'.repeat(55),
+  announce: vi.fn(),
+  registryCreate: vi.fn(),
+}));
 
 vi.mock('../../context/useWallet', () => ({
   useWallet: () => ({
-    address: ADMIN,
+    address: mocks.address,
     status: 'connected',
-    connect: vi.fn(),
+    network: 'testnet',
+    expectedNetwork: 'testnet',
     signTransaction: vi.fn(),
   }),
 }));
 
-vi.mock('../../context/useAnnouncer', () => ({ useAnnouncer: () => vi.fn() }));
+vi.mock('../../context/useAnnouncer', () => ({
+  useAnnouncer: () => mocks.announce,
+}));
 
 vi.mock('../../context/useSoroban', () => ({
-  useSoroban: () => ({ registry: state.registry, attest: state.attest }),
+  useSoroban: () => ({
+    registry: { create: mocks.registryCreate },
+  }),
 }));
+
+const validHex = 'a'.repeat(64);
+const validAddress = 'G' + 'A'.repeat(55);
+const toDateValue = (seconds: number) => new Date(seconds * 1000).toISOString().slice(0, 16);
 
 function renderPage() {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={['/admin']}>
       <DeployProgramme />
     </MemoryRouter>,
   );
 }
 
-function fillStepOne(schema: string) {
-  fireEvent.change(screen.getByLabelText('Name'), {
-    target: { value: 'Health worker stipends 2027' },
-  });
+function fillStepZero() {
+  fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Health worker stipends 2027' } });
   fireEvent.change(screen.getByLabelText('Attestation schema UID'), {
-    target: { value: schema },
+    target: { value: validHex },
   });
 }
 
-describe('DeployProgramme schema check', () => {
-  it('confirms a schema exists and shows its definition and revocability', async () => {
-    state.getSchema = vi.fn(() => Promise.resolve({ result: { unwrap: () => SCHEMA } }));
-    renderPage();
-    fillStepOne(UID);
+function fillStepOne() {
+  fireEvent.change(screen.getByLabelText('Reviewer quorum'), { target: { value: '1' } });
+  fireEvent.change(screen.getByLabelText('Tranches per award'), { target: { value: '3' } });
+  fireEvent.change(screen.getByLabelText('Reviewers (one address per line)'), {
+    target: { value: validAddress },
+  });
+  fireEvent.change(screen.getByLabelText('Verifiers (one address per line)'), {
+    target: { value: validAddress },
+  });
+}
 
-    await screen.findByText('Schema found');
-    expect(screen.getByText('Requires a verified clinic visit')).toBeTruthy();
-    expect(screen.getByText('Yes')).toBeTruthy();
-    expect(state.getSchema).toHaveBeenCalled();
-    expect(state.getSchema.mock.calls[0][0].uid.toString('hex')).toBe(UID);
-    expect(screen.getByRole('button', { name: 'Next' }).hasAttribute('disabled')).toBe(false);
+function fillValidDeadlines() {
+  const now = Math.floor(Date.now() / 1000);
+  fireEvent.change(screen.getByLabelText('Applications close'), {
+    target: { value: toDateValue(now + 60 * 60 * 24 * 2) },
+  });
+  fireEvent.change(screen.getByLabelText('Review closes'), {
+    target: { value: toDateValue(now + 60 * 60 * 24 * 3) },
+  });
+  fireEvent.change(screen.getByLabelText('Release closes'), {
+    target: { value: toDateValue(now + 60 * 60 * 24 * 4) },
+  });
+  fireEvent.change(screen.getByLabelText('Sweep opens'), {
+    target: { value: toDateValue(now + 60 * 60 * 24 * 5) },
+  });
+}
+
+describe('DeployProgramme', () => {
+  beforeEach(() => {
+    mocks.registryCreate.mockReset();
+    mocks.announce.mockClear();
   });
 
-  it('blocks the next step when attest has no schema with that UID', async () => {
-    state.getSchema = vi.fn(() =>
-      Promise.resolve({
-        result: {
-          unwrap: () => {
-            throw new Error('Error(Contract, #1)');
-          },
-        },
+  it('requires valid details before the user can continue', () => {
+    renderPage();
+
+    const next = screen.getByRole('button', { name: 'Next' });
+    expect(next).toHaveProperty('disabled', true);
+
+    fireEvent.change(screen.getByLabelText('Name'), {
+      target: { value: 'Health worker stipends 2027' },
+    });
+    fireEvent.change(screen.getByLabelText('Attestation schema UID'), {
+      target: { value: 'not-hex' },
+    });
+
+    expect(
+      screen.getByText('Enter the schema UID as a 32-byte hex string (64 characters). It must already exist in attest.'),
+    ).toBeTruthy();
+    expect(next).toHaveProperty('disabled', true);
+
+    fireEvent.change(screen.getByLabelText('Attestation schema UID'), {
+      target: { value: validHex },
+    });
+    expect(next).toHaveProperty('disabled', false);
+  });
+
+  it('blocks invalid reviewers, verifiers and quorum counts on step two', () => {
+    renderPage();
+    fillStepZero();
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    fireEvent.change(screen.getByLabelText('Reviewer quorum'), { target: { value: '3' } });
+    fireEvent.change(screen.getByLabelText('Reviewers (one address per line)'), {
+      target: { value: validAddress },
+    });
+    fireEvent.change(screen.getByLabelText('Verifiers (one address per line)'), {
+      target: { value: 'not-a-verifier' },
+    });
+
+    expect(screen.getByText('Every verifier must be a valid Stellar address, one per line.')).toBeTruthy();
+    expect(screen.getByText('Quorum cannot exceed the reviewer count (1).')).toBeTruthy();
+  });
+
+  it('shows the deadline ordering error when the dates are out of order', () => {
+    renderPage();
+    fillStepZero();
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    fillStepOne();
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    const now = Math.floor(Date.now() / 1000);
+    fireEvent.change(screen.getByLabelText('Applications close'), {
+      target: { value: toDateValue(now + 60 * 60 * 24 * 3) },
+    });
+    fireEvent.change(screen.getByLabelText('Review closes'), {
+      target: { value: toDateValue(now + 60 * 60 * 24 * 2) },
+    });
+    fireEvent.change(screen.getByLabelText('Release closes'), {
+      target: { value: toDateValue(now + 60 * 60 * 24 * 4) },
+    });
+    fireEvent.change(screen.getByLabelText('Sweep opens'), {
+      target: { value: toDateValue(now + 60 * 60 * 24 * 5) },
+    });
+
+    expect(
+      screen.getByText('The deadlines must run in order: applications, then review, then release, then sweep.'),
+    ).toBeTruthy();
+  });
+
+  it('deploys a valid programme and displays the new address', async () => {
+    mocks.registryCreate.mockResolvedValue({
+      signAndSend: vi.fn().mockResolvedValue({
+        result: { unwrap: () => 'GNEWPROGRAMADDRESSAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
       }),
-    );
-    renderPage();
-    fillStepOne(UID);
+    });
 
-    await screen.findByText(/No schema with this UID exists in attest/);
-    expect(screen.getByRole('button', { name: 'Next' }).hasAttribute('disabled')).toBe(true);
+    renderPage();
+    fillStepZero();
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    fillStepOne();
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    fillValidDeadlines();
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+
+    fireEvent.change(screen.getByLabelText('Asset contract'), {
+      target: { value: validAddress },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Deploy programme' }));
+
+    await waitFor(() => expect(screen.getByText('✓ Programme deployed')).toBeTruthy());
+    expect(screen.getByText('GNEWPROGRAMADDRESSAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA')).toBeTruthy();
   });
 
-  it('never queries attest for a UID that is not 32 bytes of hex', () => {
-    state.getSchema = vi.fn();
-    renderPage();
-    fillStepOne('not-a-uid');
+  it('shows an error panel when the registry rejects the deploy transaction', async () => {
+    mocks.registryCreate.mockImplementation(async () => {
+      throw Object.assign(new Error('Error(Contract, #3)'), { code: 3 });
+    });
 
-    expect(screen.getByText(/Enter the schema UID as a 32-byte hex string/)).toBeTruthy();
-    expect(state.getSchema).not.toHaveBeenCalled();
-    expect(screen.getByRole('button', { name: 'Next' }).hasAttribute('disabled')).toBe(true);
+    renderPage();
+    fillStepZero();
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    fillStepOne();
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    fillValidDeadlines();
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    fireEvent.change(screen.getByLabelText('Asset contract'), {
+      target: { value: validAddress },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Deploy programme' }));
+
+    await waitFor(() =>
+      expect(screen.getByText('Something went wrong that we do not have a specific explanation for.')).toBeTruthy(),
+    );
   });
 });

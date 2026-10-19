@@ -1,5 +1,27 @@
 import { formatAmount } from './amount';
 
+/**
+ * Standing aggregates, shaped the way the recipient-facing screens show them.
+ *
+ * `record.get(subject)` supplies the first three: distinct programmes,
+ * tranches released, and total received. The other two are not part of that
+ * read — the awarded-tranche denominator comes from award data and the entry's
+ * remaining life from a TTL read — so they stay optional and are omitted when
+ * the chain has not supplied them.
+ */
+export interface StandingView {
+  /** Distinct programmes that have credited this recipient. */
+  programmes: number;
+  /** Tranches released across every programme. */
+  tranchesReleased: number;
+  /** Tranches awarded across every programme, when some source can supply it. */
+  tranchesAwarded?: number;
+  /** Total received, in stroops. */
+  totalReceived: bigint;
+  /** Days until the entry is archived, when a TTL read has supplied it. */
+  liveForDays?: number;
+}
+
 /** Below this many days the TTL row warns. */
 export const TTL_WARNING_DAYS = 30;
 
@@ -24,7 +46,8 @@ const formatXlm = (amount: bigint) => formatAmount(amount, { asset: 'XLM' });
  *
  * Kept as a pure function so the screen can only ever present totals — there is
  * no path here that could enumerate individual credits, because the contract
- * stores no such list.
+ * stores no such list. The awarded-tranche denominator is not part of
+ * `record.get`, so it is shown only when a source has supplied it.
  */
 export function standingStats(standing: StandingAggregate): { label: string; value: string }[] {
   const released =

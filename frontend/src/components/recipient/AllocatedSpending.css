@@ -1,3 +1,6 @@
+/* Allocated spending section. Every value comes from a design token; none are
+   invented here. Light and dark both resolve through the semantic aliases. */
+
 .allocated-spending {
   display: flex;
   flex-direction: column;
@@ -20,14 +23,14 @@
 
 .allocated-spending__amount {
   font-family: var(--font-numeric);
+  font-variant-numeric: tabular-nums;
   font-size: var(--text-md);
   font-weight: var(--weight-semibold);
   color: var(--text);
 }
 
-/* Sample data tag */
 .allocated-spending__sample {
-  display: inline-block;
+  align-self: flex-start;
   font-size: var(--text-xs);
   font-weight: var(--weight-bold);
   border-radius: var(--radius-full);
@@ -35,10 +38,30 @@
   background: var(--surface-raised);
   color: var(--text-muted);
   white-space: nowrap;
-  align-self: flex-start;
 }
 
-/* Payee entry and check form */
+/* Phase and role gates: the reason an action is unavailable, shown rather than
+   letting the transaction fail. */
+.allocated-spending__gate {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+.allocated-spending__gate-reason {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  color: var(--text-muted);
+}
+
+.allocated-spending__empty {
+  margin: 0;
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+}
+
 .allocated-spending__form {
   display: flex;
   flex-direction: column;
@@ -46,32 +69,20 @@
 }
 
 .allocated-spending__note {
-  margin: 0;
   font-size: var(--text-caption);
-  line-height: var(--leading-body);
   color: var(--text-muted);
+  line-height: var(--leading-body);
 }
 
-.allocated-spending__check-btn {
-  align-self: flex-start;
-}
-
-.allocated-spending__send-btn {
-  align-self: flex-start;
-}
-
-/* Verification result */
 .allocated-spending__verified {
   margin: 0;
-  font-size: var(--text-caption);
-  font-weight: var(--weight-bold);
+  font-size: var(--text-sm);
   color: var(--success-strong);
+  font-weight: var(--weight-bold);
 }
 
-/* Empty state */
-.allocated-spending__empty {
-  margin: 0;
-  font-size: var(--text-caption);
-  line-height: var(--leading-body);
-  color: var(--text-muted);
+/* Buttons sit left-aligned at their natural width; the 44px tap target is
+   already guaranteed by the ui-button base. */
+.allocated-spending__action {
+  align-self: flex-start;
 }

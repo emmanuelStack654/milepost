@@ -32,6 +32,9 @@ const ProgrammeDetail = lazyWithRetry(() =>
 const FunderDashboard = lazyWithRetry(() =>
   import("./pages/FunderDashboard").then((m) => ({ default: m.FunderDashboard })),
 );
+const ReceiptLookup = lazyWithRetry(() =>
+  import("./pages/ReceiptLookup").then((m) => ({ default: m.ReceiptLookup })),
+);
 const RecipientDashboard = lazyWithRetry(() =>
   import("./pages/RecipientDashboard").then((m) => ({ default: m.RecipientDashboard })),
 );
@@ -90,6 +93,7 @@ const ROUTE_ELEMENTS: Record<string, ReactElement> = {
   "/directory": <ProgrammeDirectory />,
   "/programme": <ProgrammeDetail />,
   "/funders": <FunderDashboard />,
+  "/funders/receipt": <ReceiptLookup />,
   "/recipients": <RecipientDashboard />,
   "/recipients/standing": <Standing />,
   "/recipients/award-progress": <AwardProgress />,

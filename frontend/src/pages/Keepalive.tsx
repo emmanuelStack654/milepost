@@ -10,6 +10,8 @@ import { ErrorPanel, PendingState, TransactionOutcome } from '../components/stat
 import { Button, Field, Select } from '../components/ui';
 import { DEMO_PROGRAMME_ID } from '../context/sorobanStore';
 import { FIXTURE_PROGRAMMES } from '../fixtures/programmes';
+import { fetchAwards, fetchProgrammes } from '../lib/indexer';
+import { readProgrammeLifetimes, type EntryLifetimeRow } from '../lib/entryTtl';
 import {
   FIXTURE_TTL,
   TTL_EXTENDED_DAYS,
@@ -254,8 +256,8 @@ export const Keepalive = () => {
 
       <p className="keepalive-page__note">
         The network archives stored entries that nobody extends. Anyone can extend them, and
-        network fees are covered. An archived award or contribution can&rsquo;t be released or
-        refunded until it&rsquo;s restored.
+        the network fee for the extension is paid from your own wallet. An archived award or
+        contribution can&rsquo;t be released or refunded until it&rsquo;s restored.
       </p>
 
       <Select
@@ -381,3 +383,61 @@ export const Keepalive = () => {
     </div>
   );
 };
+
+function RealLifetimes({
+  loading,
+  error,
+  rows,
+  unchecked,
+  onRetry,
+}: {
+  loading: boolean;
+  error: unknown;
+  rows: EntryLifetimeRow[] | null;
+  unchecked: string[];
+  onRetry: () => void;
+}) {
+  if (loading && !rows) return <Loading label="Reading entry lifetimes" rows={2} />;
+  if (error && !rows) return <ErrorState error={error} onRetry={onRetry} />;
+  if (!rows) return null;
+
+  return (
+    <>
+      <ul className="ttl-rows">
+        {rows.map((row) => {
+          const days = row.liveForDays;
+          const low = days !== null && days < TTL_WARNING_DAYS;
+          return (
+            <li key={row.key} className={`ttl-row${low ? ' ttl-row--low' : ''}`}>
+              <span className="ttl-row__text">
+                <span className="ttl-row__label">{row.label}</span>
+                <span className="ttl-row__note">
+                  {row.note} · {days === null ? 'not found on chain' : `~${days} days left`}
+                </span>
+              </span>
+              <div className="ttl-row__bar" aria-hidden="true">
+                <span
+                  className={`ttl-row__fill${low ? ' ttl-row__fill--low' : ''}`}
+                  style={{
+                    width: `${days === null ? 0 : Math.min(100, Math.round((days / TTL_EXTENDED_DAYS) * 100))}%`,
+                  }}
+                />
+              </div>
+              {low && (
+                <span className="ttl-row__warning" role="status">
+                  Under {TTL_WARNING_DAYS} days — extend soon.
+                </span>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+      {unchecked.length > 0 && (
+        <p className="keepalive-page__unchecked">
+          Not checked: {unchecked.join(' and ')}. Their entries are keyed by contributor and
+          applicant addresses that are not published, so they can&rsquo;t be looked up from here.
+        </p>
+      )}
+    </>
+  );
+}

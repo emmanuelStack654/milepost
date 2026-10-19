@@ -1,17 +1,22 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import type { ProgrammeConfig } from '@milepost/program';
 import { useSoroban } from '../context/useSoroban';
 import { useWallet } from '../context/useWallet';
+import { useAnnouncer } from '../context/useAnnouncer';
 import { useContractResult, useProgrammeParam, useTransaction } from '../hooks';
 import { AddressChip, Badge, Button, Card, Field, RadioGroup, TextArea } from '../components/ui';
 import { ProgrammeParamNotice } from '../components/programme/ProgrammeParamNotice';
-import { Empty, ErrorState, PendingState, TransactionOutcome } from '../components/state/AsyncStates';
+import { Empty, ErrorPanel, ErrorState, PendingState, TransactionOutcome } from '../components/state/AsyncStates';
 import { FIXTURE_PAYEES, type PayeeFixture } from '../fixtures/payeeFixtures';
 import {
+  bulkBatchDone,
+  bulkBatchFailed,
+  bulkBatchStart,
+  bulkCheckSummary,
   chunkAddresses,
   classifyBulkAddresses,
-  MAX_PAYEE_BATCH,
+  countBulkAddresses,
   parseBulkAddresses,
   type BulkAddress,
   type BulkMode,
@@ -23,9 +28,22 @@ const PAYEE_ADDRESS = /^G[A-Z2-7]{55}$/;
 
 type PayeeStatus = 'checking' | 'verified' | 'unverified' | 'error';
 
+function isSampleProgramme(programmeId: string): boolean {
+  return FIXTURE_PROGRAMMES.some((p) => p.id === programmeId);
+}
+
+interface SessionChange {
+  address: string;
+  label: string;
+  action: 'added' | 'removed';
+}
+
 const storageKey = (programmeId: string) => `milepost:programme-payees:${programmeId}`;
 
 function loadCandidates(programmeId: string): PayeeFixture[] {
+  if (!isSampleProgramme(programmeId)) {
+    return [];
+  }
   try {
     const stored = window.localStorage.getItem(storageKey(programmeId));
     if (stored) return JSON.parse(stored) as PayeeFixture[];
@@ -83,6 +101,32 @@ export const PayeeManagement = () => {
       config.data.creator === wallet.address,
   );
 
+  const [sessionChanges, setSessionChanges] = useState<Record<string, SessionChange[]>>({});
+  const currentSessionChanges = sessionChanges[programmeId] ?? [];
+
+  const [checkInput, setCheckInput] = useState('');
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const [checkResult, setCheckResult] = useState<{ address: string; verified: boolean } | null>(null);
+  const [checkLoading, setCheckLoading] = useState(false);
+
+  const handleCheckAddress = async () => {
+    const addr = checkInput.trim();
+    if (!PAYEE_ADDRESS.test(addr)) {
+      setCheckError('Enter a valid Stellar address.');
+      return;
+    }
+    setCheckError(null);
+    setCheckLoading(true);
+    try {
+      const { result } = await programme.is_payee({ payee: addr });
+      setCheckResult({ address: addr, verified: Boolean(result) });
+    } catch {
+      setCheckError('Could not check address on-chain.');
+    } finally {
+      setCheckLoading(false);
+    }
+  };
+
   const [sessionAdds, setSessionAdds] = useState<Record<string, PayeeFixture[]>>({});
   const candidates = useMemo(() => {
     if (!programmeId) return [];
@@ -133,7 +177,7 @@ export const PayeeManagement = () => {
 
   const handleLookupProgramme = () => {
     const value = programmeInput.trim();
-    if (!PROGRAMME_ADDRESS.test(value)) {
+    if (!isSampleProgramme(value) && !PROGRAMME_ADDRESS.test(value)) {
       setProgrammeError('Enter a valid programme contract address.');
       return;
     }
@@ -152,7 +196,16 @@ export const PayeeManagement = () => {
   const tx = useTransaction({
     contract: 'program',
     onSuccess: () => {
-      remember({ address: addressInput.trim(), label: labelInput.trim() || 'Verified payee' });
+      const addr = addressInput.trim();
+      const lbl = labelInput.trim() || 'Verified payee';
+      remember({ address: addr, label: lbl });
+      setSessionChanges((prev) => ({
+        ...prev,
+        [programmeId]: [
+          { address: addr, label: lbl, action: 'added' },
+          ...(prev[programmeId] ?? []).filter((c) => c.address !== addr),
+        ],
+      }));
       setAddressInput('');
       setLabelInput('');
     },
@@ -188,7 +241,21 @@ export const PayeeManagement = () => {
   const [bulkProgress, setBulkProgress] = useState<{ done: number; total: number } | null>(null);
   const [bulkSending, setBulkSending] = useState(false);
 
-  const bulkTx = useTransaction({ contract: 'program' });
+  // Issue #482: progress between the first batch and the last has to reach a
+  // screen reader, so every batch speaks through the shared announcer — the
+  // inline progress line below is visual only and carries no live semantics.
+  const announce = useAnnouncer();
+
+  // The failure reason `explain()` produced for the batch currently in flight.
+  // `bulkTx.error` is state and lands a render later; the announcement goes
+  // out the moment the send gives up, so the reason is captured as it happens.
+  const bulkFailureReason = useRef<string | null>(null);
+  const bulkTx = useTransaction({
+    contract: 'program',
+    onError: (error) => {
+      bulkFailureReason.current = error.message;
+    },
+  });
 
   const eligibleAddresses = useMemo(
     () => (bulkResults ?? []).filter((entry) => entry.status === 'eligible').map((entry) => entry.address),
@@ -217,9 +284,17 @@ export const PayeeManagement = () => {
     setBulkSending(true);
     setBulkProgress({ done: 0, total: batches.length });
     const verifiedInThisRun: string[] = [];
+    const total = batches.length;
+    const requested = eligibleAddresses.length;
+    let succeeded = 0;
     for (let i = 0; i < batches.length; i++) {
       const batch = batches[i];
       const call = bulkMode === 'verify' ? programme.allow_payees : programme.deny_payees;
+      // Start and result are two separate polite announcements: a batch can
+      // take longer than a screen reader would otherwise infer from the
+      // press, and a failure interrupts with what already landed (issue #482).
+      announce(bulkBatchStart(i + 1, total, batch.length, bulkMode));
+      bulkFailureReason.current = null;
       const result = await bulkTx.send(() => call({ payees: batch }));
       if (result === null) {
         // Failed or blocked: stop rather than skip ahead. The batches
@@ -227,15 +302,39 @@ export const PayeeManagement = () => {
         // remaining ones are simply not attempted yet, so retrying (once
         // whatever failed is fixed) picks up from here rather than
         // resending what already landed.
-        setBulkProgress({ done: i, total: batches.length });
+        setBulkProgress({ done: i, total });
         setBulkSending(false);
+        announce(
+          bulkBatchFailed(i + 1, total, succeeded, requested, bulkMode, bulkFailureReason.current),
+          'alert',
+        );
         return;
       }
+      succeeded += batch.length;
       if (bulkMode === 'verify') verifiedInThisRun.push(...batch);
-      setBulkProgress({ done: i + 1, total: batches.length });
+      announce(bulkBatchDone(i + 1, total, batch.length, bulkMode));
+      setBulkProgress({ done: i + 1, total });
     }
     for (const address of verifiedInThisRun) {
       remember({ address, label: 'Bulk verified' });
+    }
+    if (verifiedInThisRun.length > 0) {
+      setSessionChanges((prev) => ({
+        ...prev,
+        [programmeId]: [
+          ...verifiedInThisRun.map((address) => ({ address, label: 'Bulk verified', action: 'added' as const })),
+          ...(prev[programmeId] ?? []).filter((c) => !verifiedInThisRun.includes(c.address)),
+        ],
+      }));
+    }
+    if (bulkMode === 'remove' && eligibleAddresses.length > 0) {
+      setSessionChanges((prev) => ({
+        ...prev,
+        [programmeId]: [
+          ...eligibleAddresses.map((address) => ({ address, label: 'Bulk removed', action: 'removed' as const })),
+          ...(prev[programmeId] ?? []).filter((c) => !eligibleAddresses.includes(c.address)),
+        ],
+      }));
     }
     setBulkText('');
     setBulkResults(null);
@@ -243,16 +342,7 @@ export const PayeeManagement = () => {
     setBulkSending(false);
   };
 
-  const bulkCounts = useMemo(() => {
-    const counts = { eligible: 0, invalid: 0, duplicate: 0, skipped: 0 };
-    for (const entry of bulkResults ?? []) {
-      if (entry.status === 'eligible') counts.eligible++;
-      else if (entry.status === 'invalid') counts.invalid++;
-      else if (entry.status === 'duplicate') counts.duplicate++;
-      else counts.skipped++; // already-verified or not-verified
-    }
-    return counts;
-  }, [bulkResults]);
+  const bulkCounts = useMemo(() => countBulkAddresses(bulkResults), [bulkResults]);
 
   return (
     <div className="payee-mgmt">
@@ -307,6 +397,40 @@ export const PayeeManagement = () => {
           action={<Button onClick={() => void wallet.connect()}>Sign in</Button>}
         />
       )}
+
+      <Card title="Check a payee address">
+        <p className="payee-mgmt__consequence">
+          Any address can be checked with <span className="numeric">is_payee</span> to confirm whether it is currently verified on-chain.
+        </p>
+        <div className="payee-mgmt__check-form">
+          <Field
+            label="Check payee address"
+            placeholder="G..."
+            value={checkInput}
+            onChange={(event) => {
+              setCheckInput(event.target.value);
+              setCheckError(null);
+            }}
+            error={checkError}
+          />
+          <Button
+            variant="secondary"
+            onClick={() => void handleCheckAddress()}
+            loading={checkLoading}
+            disabled={!checkInput.trim()}
+          >
+            Check address
+          </Button>
+        </div>
+        {checkResult && (
+          <div className="payee-mgmt__check-result" role="status">
+            <AddressChip address={checkResult.address} copyLabel="Copy checked address" />
+            <Badge tone={checkResult.verified ? 'success' : 'danger'}>
+              {checkResult.verified ? 'Verified on-chain' : 'Not verified'}
+            </Badge>
+          </div>
+        )}
+      </Card>
 
       <Card title="Verify a payee">
         <p className="payee-mgmt__consequence">
@@ -398,7 +522,11 @@ export const PayeeManagement = () => {
           </Button>
 
           {bulkResults && (
-            <div className="payee-mgmt__bulk-results" aria-live="polite">
+            // The pasted list is deliberately not a live region — reading sixty
+            // addresses back is noise. The summary line carries the polite
+            // announcement of what the check found; batch progress goes
+            // through the shared announcer (issue #482).
+            <div className="payee-mgmt__bulk-results">
               <ul className="payee-mgmt__bulk-list">
                 {bulkResults.map((entry) => {
                   const tone =
@@ -427,13 +555,8 @@ export const PayeeManagement = () => {
                   );
                 })}
               </ul>
-              <p className="payee-mgmt__bulk-summary">
-                {bulkCounts.eligible} to {bulkMode === 'verify' ? 'verify' : 'remove'}
-                {bulkCounts.invalid > 0 && `, ${bulkCounts.invalid} invalid`}
-                {bulkCounts.duplicate > 0 && `, ${bulkCounts.duplicate} duplicate`}
-                {bulkCounts.skipped > 0 && `, ${bulkCounts.skipped} already ${bulkMode === 'verify' ? 'verified' : 'unverified'}`}
-                {batches.length > 1 && ` — sent as ${batches.length} batches of up to ${MAX_PAYEE_BATCH}`}
-                .
+              <p className="payee-mgmt__bulk-summary" aria-live="polite">
+                {bulkCheckSummary(bulkCounts, bulkMode, batches.length)}
               </p>
               <Button
                 variant={bulkMode === 'remove' ? 'danger' : 'primary'}
@@ -445,53 +568,88 @@ export const PayeeManagement = () => {
                 {eligibleAddresses.length === 1 ? '' : 's'}
               </Button>
               {bulkProgress && (
-                <p className="payee-mgmt__bulk-progress" role="status">
+                <p className="payee-mgmt__bulk-progress">
                   Sending batch {Math.min(bulkProgress.done + 1, bulkProgress.total)} of {bulkProgress.total}
                   {bulkProgress.done > 0 && ` (${bulkProgress.done} done)`}…
                 </p>
               )}
             </div>
           )}
-          <TransactionOutcome
-            phase={bulkTx.phase}
-            error={bulkTx.error}
-            successTitle={bulkMode === 'verify' ? 'Batch verified' : 'Batch removed'}
-          />
+          {/* Announced by the shared announcer the moment a batch fails, so
+              the panel stays visual (`live={false}`) and the reason is read
+              once, alongside how much of the run landed. */}
+          {bulkTx.error && <ErrorPanel explained={bulkTx.error} live={false} />}
         </div>
       </Card>
 
-      <Card title="Verified payees">
-        {candidates.length === 0 ? (
-          <Empty
-            title="No payees checked yet"
-            description="Verifying a payee is what makes Direct and Allocated payments possible — until at least one address is verified, no tranche in those modes can be paid out."
-          />
+      <Card title={isSample ? 'Verified payees (Sample data)' : 'Payees changed this session'}>
+        {isSample ? (
+          candidates.length === 0 ? (
+            <Empty
+              title="No payees checked yet"
+              description="Verifying a payee is what makes Direct and Allocated payments possible — until at least one address is verified, no tranche in those modes can be paid out."
+            />
+          ) : (
+            <ul className="payee-mgmt__list">
+              {candidates.map((candidate) => {
+                const status = statusByAddress[candidate.address] ?? 'checking';
+                const tone =
+                  status === 'verified' ? 'success' : status === 'error' ? 'warning' : status === 'checking' ? 'neutral' : 'danger';
+                const label =
+                  status === 'verified'
+                    ? 'Verified'
+                    : status === 'checking'
+                    ? 'Checking…'
+                    : status === 'error'
+                    ? 'Could not check'
+                    : 'Not verified';
+                return (
+                  <li key={candidate.address} className="payee-mgmt__row">
+                    <div className="payee-mgmt__row-info">
+                      <span className="payee-mgmt__row-label">{candidate.label}</span>
+                      <AddressChip address={candidate.address} copyLabel="Copy payee address" />
+                    </div>
+                    <div className="payee-mgmt__row-actions">
+                      <Badge tone="warning">Sample data</Badge>
+                      <Badge tone={tone}>{label}</Badge>
+                      {isCreator && status === 'verified' && (
+                        <Button
+                          variant="secondary"
+                          onClick={() => handleRevoke(candidate.address)}
+                          loading={tx.busy}
+                        >
+                          Remove
+                        </Button>
+                      )}
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )
         ) : (
-          <ul className="payee-mgmt__list">
-            {candidates.map((candidate) => {
-              const status = statusByAddress[candidate.address] ?? 'checking';
-              const tone =
-                status === 'verified' ? 'success' : status === 'error' ? 'warning' : status === 'checking' ? 'neutral' : 'danger';
-              const label =
-                status === 'verified'
-                  ? 'Verified'
-                  : status === 'checking'
-                  ? 'Checking…'
-                  : status === 'error'
-                  ? 'Could not check'
-                  : 'Not verified';
-              return (
-                <li key={candidate.address} className="payee-mgmt__row">
+          currentSessionChanges.length === 0 ? (
+            <Empty
+              title="No payees changed this session"
+              description="Real programmes show no fixture payees. Addresses added or removed this session in this browser are listed here and labelled as session-only."
+            />
+          ) : (
+            <ul className="payee-mgmt__list">
+              {currentSessionChanges.map((entry) => (
+                <li key={entry.address} className="payee-mgmt__row">
                   <div className="payee-mgmt__row-info">
-                    <span className="payee-mgmt__row-label">{candidate.label}</span>
-                    <AddressChip address={candidate.address} copyLabel="Copy payee address" />
+                    <span className="payee-mgmt__row-label">{entry.label}</span>
+                    <AddressChip address={entry.address} copyLabel="Copy payee address" />
                   </div>
                   <div className="payee-mgmt__row-actions">
-                    <Badge tone={tone}>{label}</Badge>
-                    {isCreator && status === 'verified' && (
+                    <Badge tone="neutral">Session-only</Badge>
+                    <Badge tone={entry.action === 'added' ? 'success' : 'danger'}>
+                      {entry.action === 'added' ? 'Verified' : 'Removed'}
+                    </Badge>
+                    {isCreator && entry.action === 'added' && (
                       <Button
                         variant="secondary"
-                        onClick={() => handleRevoke(candidate.address)}
+                        onClick={() => handleRevoke(entry.address)}
                         loading={tx.busy}
                       >
                         Remove
@@ -499,9 +657,9 @@ export const PayeeManagement = () => {
                     )}
                   </div>
                 </li>
-              );
-            })}
-          </ul>
+              ))}
+            </ul>
+          )
         )}
       </Card>
         </>

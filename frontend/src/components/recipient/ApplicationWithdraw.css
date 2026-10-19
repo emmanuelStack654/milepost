@@ -1,118 +1,43 @@
+/* Withdraw application section. Every value comes from a design token. */
+
 .app-withdraw {
+  border-top: 1px solid var(--surface-raised);
+  padding-top: var(--space-4);
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
 }
 
-/* The initial trigger — shown as a secondary action so it does not compete
-   with the primary timeline content. min-height ensures 44 px tap target. */
+.app-withdraw__gate {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+.app-withdraw__gate-reason {
+  margin: 0;
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  color: var(--text-muted);
+}
+
+/* The trigger sits left-aligned at its natural width; the 44px tap target is
+   guaranteed by the ui-button base. */
 .app-withdraw__trigger {
   align-self: flex-start;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: var(--tap-min);
-  box-sizing: border-box;
-  padding: var(--space-2) var(--space-4);
-  border: 0;
-  border-radius: var(--radius-full);
-  background: var(--surface-raised);
-  color: var(--text-muted);
-  font: inherit;
-  font-size: var(--text-caption);
-  font-weight: var(--weight-bold);
-  cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-
-.app-withdraw__trigger:hover {
-  background: var(--refund-soft);
-  color: var(--refund-strong);
-}
-
-.app-withdraw__trigger:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: var(--focus-offset);
-}
-
-.app-withdraw__trigger:disabled {
-  opacity: var(--opacity-unavailable);
-  cursor: not-allowed;
-}
-
-/* Confirmation step */
-.app-withdraw__confirm {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  padding: var(--space-3) var(--space-4);
-  border-radius: var(--radius-row);
-  background: var(--warning-soft);
 }
 
 .app-withdraw__warning {
-  margin: 0;
-  font-size: var(--text-sm);
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-md);
   line-height: var(--leading-body);
   color: var(--text);
 }
 
-.app-withdraw__actions {
+.app-withdraw__modal-actions {
   display: flex;
-  gap: var(--space-2);
+  justify-content: flex-end;
+  gap: var(--space-3);
   flex-wrap: wrap;
-}
-
-.app-withdraw__confirm-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: var(--tap-min);
-  box-sizing: border-box;
-  padding: var(--space-2) var(--space-4);
-  border: 0;
-  border-radius: var(--radius-full);
-  background: var(--refund);
-  color: hsl(0 0% 100%);
-  font: inherit;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-bold);
-  cursor: pointer;
-  transition: opacity 0.15s ease;
-}
-
-.app-withdraw__confirm-btn:hover {
-  opacity: 0.9;
-}
-
-.app-withdraw__confirm-btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: var(--focus-offset);
-}
-
-.app-withdraw__confirm-btn:disabled {
-  opacity: var(--opacity-unavailable);
-  cursor: not-allowed;
-}
-
-.app-withdraw__cancel-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: var(--tap-min);
-  box-sizing: border-box;
-  padding: var(--space-2) var(--space-4);
-  border: 0;
-  border-radius: var(--radius-full);
-  background: var(--surface-raised);
-  color: var(--text);
-  font: inherit;
-  font-size: var(--text-sm);
-  font-weight: var(--weight-bold);
-  cursor: pointer;
-}
-
-.app-withdraw__cancel-btn:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: var(--focus-offset);
 }

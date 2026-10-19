@@ -208,3 +208,16 @@
   font-size: var(--text-xs);
   color: var(--text-muted);
 }
+
+/* Issue #483: stepping sweeps the squares and the selected tab to their new
+   colour. Under reduced motion they swap instantly instead — the step, the
+   copy and the legend still update, so nothing about the information is
+   animation-dependent. (tokens.css already shortens every transition; this
+   states the intent where the motion lives, as ui.css and AsyncStates.css do
+   for theirs.) */
+@media (prefers-reduced-motion: reduce) {
+  .money-path-tab,
+  .grid-square {
+    transition: none;
+  }
+}

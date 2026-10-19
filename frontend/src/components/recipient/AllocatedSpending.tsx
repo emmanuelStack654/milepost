@@ -5,9 +5,10 @@ import { useContractRead, useTransaction } from '../../hooks';
 import { formatAmount, validateAmount } from '../../lib/amount';
 import { explain, explainCode, type Explained } from '../../lib/errors';
 import { looksLikeContractId, truncateAddress } from '../../lib/format';
+import { isPhase, phaseRequirement, type Phase } from '../../lib/phaseGate';
 import { sampleSendable, SAMPLE_TX_DELAY_MS } from '../../lib/fundingTx';
 import { AmountField, Button, Field } from '../ui';
-import { ErrorPanel, TransactionOutcome } from '../state/AsyncStates';
+import { ErrorPanel, PendingPulse, TransactionOutcome } from '../state/AsyncStates';
 import type { RecipientAwardFixture } from '../../fixtures/recipientFixtures';
 import './AllocatedSpending.css';
 
@@ -22,6 +23,15 @@ type PayeeCheck =
   | { status: 'unverified' }
   | { status: 'error'; explained: Explained };
 
+type View =
+  | { kind: 'role-gate' }
+  | { kind: 'phase-error' }
+  | { kind: 'phase-loading' }
+  | { kind: 'phase-blocked'; phase: Phase }
+  | { kind: 'allocation-error' }
+  | { kind: 'empty' }
+  | { kind: 'form' };
+
 export interface AllocatedSpendingProps {
   award: RecipientAwardFixture;
   /** Stand-in transaction delay for sample programmes, overridable for tests. */
@@ -35,7 +45,8 @@ export interface AllocatedSpendingProps {
  * payee. `program` keeps no payee list, so the recipient enters or pastes an
  * address and we check it with `is_payee` before anything is signed. The
  * available amount is `allocation_of(recipient)`, read on-chain and re-read
- * after a successful `spend`. Every failure renders through `explain()`.
+ * after a successful `spend`. Everything is gated on phase (Settled) and role
+ * (a connected wallet), and every failure renders through `explain()`.
  *
  * Sample programmes — those whose id is not a real contract address — fall
  * back to the fixture escrow and a stand-in send, so the layout is still
@@ -53,17 +64,31 @@ export function AllocatedSpending({ award, sampleDelayMs = SAMPLE_TX_DELAY_MS }:
     [isReal, programmeAt, award.programmeId],
   );
 
-  // Escrow this recipient may still direct. `allocation_of` is infallible —
-  // returns i128 directly, no Result wrapper, so use useContractRead not
-  // useContractResult.
+  // Escrow this recipient may still direct. Infallible on the contract, so a
+  // plain read; the fixture escrow stands in for samples.
   const allocationRead = useContractRead<bigint>(
     () => client!.allocation_of({ recipient: recipient! }),
     [client, recipient],
     { enabled: isReal && Boolean(recipient), contract: 'program' },
   );
 
+  // Programme phase, for gating. `spend` is only available once Settled, before
+  // the sweep window opens; the sweep-window error (35) still surfaces through
+  // the transaction and `explain()`.
+  const phaseRead = useContractRead<{ tag: string }>(
+    async () => {
+      const response = await client!.get_phase();
+      return { result: response.result.unwrap() };
+    },
+    [client],
+    { enabled: isReal, contract: 'program' },
+  );
+
   const sampleAllocation = award.escrow ? BigInt(award.escrow) : 0n;
-  const allocation = isReal ? (allocationRead.data ?? 0n) : sampleAllocation;
+  const allocation = isReal ? allocationRead.data ?? 0n : sampleAllocation;
+
+  const phaseTag = isReal ? phaseRead.data?.tag : 'Settled';
+  const phase: Phase | null = phaseTag && isPhase(phaseTag) ? phaseTag : null;
 
   const [payeeAddress, setPayeeAddress] = useState('');
   const [payeeCheck, setPayeeCheck] = useState<PayeeCheck>({ status: 'idle' });
@@ -73,7 +98,6 @@ export function AllocatedSpending({ award, sampleDelayMs = SAMPLE_TX_DELAY_MS }:
   const tx = useTransaction<bigint>({
     contract: 'program',
     onSuccess: () => {
-      // Re-read escrow after a successful spend so the balance updates.
       if (isReal) allocationRead.refetch();
       setPayeeAddress('');
       setAmount('');
@@ -91,19 +115,33 @@ export function AllocatedSpending({ award, sampleDelayMs = SAMPLE_TX_DELAY_MS }:
       : 'Enter a valid Stellar address (starts with G).';
   const canCheckPayee = PAYEE_ADDRESS.test(trimmedPayee) && payeeCheck.status !== 'checking';
   const canSend =
-    payeeCheck.status === 'verified' &&
-    amountValue !== null &&
-    !tx.busy &&
-    Boolean(recipient);
+    payeeCheck.status === 'verified' && amountValue !== null && !tx.busy && Boolean(recipient);
 
   const receipt = sentInfo
     ? `${formatAmount(sentInfo.amount, { asset: ASSET })} to ${truncateAddress(sentInfo.payee)}`
     : undefined;
 
+  // Decide which state the section is in, so the gates take precedence over
+  // the form and the reasons are shown rather than letting the transaction fail.
+  let view: View;
+  if (!recipient) {
+    view = { kind: 'role-gate' };
+  } else if (isReal && phaseRead.error && phase === null) {
+    view = { kind: 'phase-error' };
+  } else if (phase === null) {
+    view = { kind: 'phase-loading' };
+  } else if (phase !== 'Settled') {
+    view = { kind: 'phase-blocked', phase };
+  } else if (isReal && allocationRead.error && allocation === 0n) {
+    view = { kind: 'allocation-error' };
+  } else if (allocation === 0n) {
+    view = { kind: 'empty' };
+  } else {
+    view = { kind: 'form' };
+  }
+
   const handlePayeeChange = (value: string) => {
     setPayeeAddress(value);
-    // Clear the previous check result whenever the address changes so the
-    // user cannot send to an address that was verified but then edited.
     setPayeeCheck({ status: 'idle' });
   };
 
@@ -114,11 +152,7 @@ export function AllocatedSpending({ award, sampleDelayMs = SAMPLE_TX_DELAY_MS }:
     try {
       if (isReal) {
         const { result } = await client!.is_payee({ payee: addr });
-        if (result) {
-          setPayeeCheck({ status: 'verified' });
-        } else {
-          setPayeeCheck({ status: 'unverified' });
-        }
+        setPayeeCheck(result ? { status: 'verified' } : { status: 'unverified' });
       } else {
         // Sample stand-in: a valid address reads as verified for the demo.
         setPayeeCheck({ status: 'verified' });
@@ -153,19 +187,59 @@ export function AllocatedSpending({ award, sampleDelayMs = SAMPLE_TX_DELAY_MS }:
       <div className="allocated-spending__header">
         <span className="allocated-spending__title">Held for you in escrow</span>
         <span className="allocated-spending__amount">
-          {formatAmount(allocation, { asset: ASSET })}
+          {isReal && allocationRead.data === null && allocationRead.fetching ? (
+            <PendingPulse label="Reading escrow balance" />
+          ) : (
+            formatAmount(allocation, { asset: ASSET })
+          )}
         </span>
       </div>
 
       {!isReal && <span className="allocated-spending__sample">Sample data</span>}
 
-      {allocation > 0n && (
+      {view.kind === 'role-gate' && (
+        <div className="allocated-spending__gate">
+          <p className="allocated-spending__gate-reason">
+            Connect a wallet to direct your escrow to a verified payee.
+          </p>
+          <Button variant="secondary" onClick={() => void wallet.connect()}>
+            Sign in
+          </Button>
+        </div>
+      )}
+
+      {view.kind === 'phase-error' && (
+        <ErrorPanel explained={explain(phaseRead.error, 'program')} onRetry={phaseRead.refetch} />
+      )}
+
+      {view.kind === 'phase-loading' && (
+        <p className="allocated-spending__gate" role="status" aria-live="polite">
+          Checking the programme phase…
+        </p>
+      )}
+
+      {view.kind === 'phase-blocked' && (
+        <div className="allocated-spending__gate">
+          <p className="allocated-spending__gate-reason">{phaseRequirement('Settled', view.phase)}</p>
+        </div>
+      )}
+
+      {view.kind === 'allocation-error' && (
+        <ErrorPanel
+          explained={explain(allocationRead.error, 'program')}
+          onRetry={allocationRead.refetch}
+        />
+      )}
+
+      {view.kind === 'empty' && (
+        <p className="allocated-spending__empty">Nothing held in escrow right now.</p>
+      )}
+
+      {view.kind === 'form' && (
         <div className="allocated-spending__form">
           <p className="allocated-spending__note">
-            Enter or paste the address of the payee you want to receive the funds.
-            Only addresses the programme creator verified are accepted — check
-            before signing so you do not lose your submission fee to a refused
-            transaction.
+            Enter or paste a payee address. Escrow can only go to a payee the programme&rsquo;s
+            creator verified — check it before signing.
           </p>
 
           <Field
@@ -180,7 +254,7 @@ export function AllocatedSpending({ award, sampleDelayMs = SAMPLE_TX_DELAY_MS }:
 
           <Button
             variant="secondary"
-            className="allocated-spending__check-btn"
+            className="allocated-spending__action"
             onClick={() => void handleCheckPayee()}
             loading={payeeCheck.status === 'checking'}
             disabled={!canCheckPayee}
@@ -193,13 +267,11 @@ export function AllocatedSpending({ award, sampleDelayMs = SAMPLE_TX_DELAY_MS }:
               Verified — this payee can receive escrow.
             </p>
           )}
-
           {payeeCheck.status === 'unverified' && (
             <ErrorPanel explained={explainCode('program', 30)} live={false} />
           )}
-
           {payeeCheck.status === 'error' && (
-            <ErrorPanel explained={(payeeCheck as { status: 'error'; explained: Explained }).explained} live={false} />
+            <ErrorPanel explained={payeeCheck.explained} live={false} />
           )}
 
           <AmountField
@@ -211,7 +283,7 @@ export function AllocatedSpending({ award, sampleDelayMs = SAMPLE_TX_DELAY_MS }:
           />
 
           <Button
-            className="allocated-spending__send-btn"
+            className="allocated-spending__action"
             onClick={() => void handleSend()}
             disabled={!canSend}
             loading={tx.busy}
@@ -228,10 +300,6 @@ export function AllocatedSpending({ award, sampleDelayMs = SAMPLE_TX_DELAY_MS }:
             onRetry={() => void handleSend()}
           />
         </div>
-      )}
-
-      {allocation === 0n && !tx.busy && tx.phase !== 'success' && (
-        <p className="allocated-spending__empty">Nothing held in escrow right now.</p>
       )}
     </div>
   );

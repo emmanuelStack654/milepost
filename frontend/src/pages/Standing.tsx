@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { Buffer } from 'buffer';
 import type { Standing as OnChainStanding } from '@milepost/record';
@@ -12,6 +12,7 @@ import { useWallet } from '../context/useWallet';
 import { FIXTURE_STANDING } from '../fixtures/standing';
 import { KEEPALIVE_DAYS, isTtlLow, standingStats, type StandingAggregate } from '../lib/standing';
 import { describeAmount } from '../lib/amount';
+import { looksLikeAddress } from '../lib/format';
 import { isFailure } from '../lib/errors';
 import {
   parseStandingHistory,
@@ -207,10 +208,10 @@ export function RecipientSignedOut({ onSignIn }: { onSignIn: () => void }) {
   return (
     <div className="standing-signout">
       <div className="standing-signout__copy">
-        <h2>Sign in to see your awards</h2>
+        <h2>Sign in to see your standing</h2>
         <p>
-          Use a browser wallet to see what has been released and what is still waiting on a
-          verifier. Browsing programmes never needs sign-in.
+          Use a browser wallet to read your own standing, awards, and application progress.
+          Looking up another address never needs sign-in.
         </p>
         <div className="standing-signout__actions">
           <Button onClick={onSignIn}>Sign in</Button>
@@ -260,9 +261,13 @@ export function StandingStats({ standing }: { standing: StandingAggregate }) {
  * The TTL row: how long this standing stays readable, and a permissionless way
  * to extend it. Anyone may extend anyone's entry, so this needs no ownership —
  * only a connected wallet to pay the fee.
+ *
+ * The remaining life is a TTL read the frontend does not surface yet, so when
+ * it is unknown the row offers the extension without promising a number.
  */
 function StandingTtlRow({ liveForDays, subject }: { liveForDays: number; subject: string }) {
   const { record } = useSoroban();
+  const { address } = useWallet();
   const announce = useAnnouncer();
   const [extended, setExtended] = useState(false);
 
@@ -293,7 +298,9 @@ function StandingTtlRow({ liveForDays, subject }: { liveForDays: number; subject
     <div className={`standing-ttl${low ? ' standing-ttl--low' : ''}`}>
       <span className="standing-ttl__copy">
         <span className="standing-ttl__title">
-          Stays on the network for about {days} more days
+          {known
+            ? `Stays on the network for about ${days} more days`
+            : 'Kept alive by anyone who extends it'}
         </span>
         <span className="standing-ttl__sub">
           Records are archived if nobody extends them. Anyone can extend one; it costs you
@@ -305,7 +312,7 @@ function StandingTtlRow({ liveForDays, subject }: { liveForDays: number; subject
         onClick={handleExtend}
         loading={tx.busy}
         loadingLabel={phaseLabel(tx.phase) || 'Extending…'}
-        disabled={extended}
+        disabled={extended || !address}
       >
         {extended ? 'Extended' : 'Extend now'}
       </Button>
@@ -332,10 +339,10 @@ function StandingPanel({ standing, subject }: { standing: OnChainStanding; subje
   return (
     <div className="standing-panel">
       <p className="standing-panel__intro">
-        Your standing is a record of what you&rsquo;ve received and delivered across every
-        programme. It can&rsquo;t be transferred, and it holds totals only, not a list of who
-        funded you. It lives in its own contract that any programme can read, so the next funder
-        can underwrite against it — even one this protocol has never seen.
+        Standing is a record of what someone has received and delivered across every programme.
+        It can&rsquo;t be transferred, and it holds totals only, not a list of who funded them. It
+        lives in its own contract that any programme can read, so the next funder can underwrite
+        against it — even one this protocol has never seen.
       </p>
 
       <StandingStats standing={aggregate} />
@@ -375,6 +382,25 @@ export const Standing = () => {
   const { address } = useWallet();
   const { record } = useSoroban();
   const [signInOpen, setSignInOpen] = useState(false);
+  const [lookupInput, setLookupInput] = useState('');
+  const [lookedUp, setLookedUp] = useState<string | null>(null);
+
+  const subject = lookedUp ?? address;
+  const candidate = lookupInput.trim();
+  const canLookup = looksLikeAddress(candidate) && candidate !== subject;
+
+  const submitLookup = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!canLookup) return;
+    setLookedUp(candidate);
+    setLookupInput('');
+  };
+
+  const standing = useContractResult<OnChainStanding>(
+    () => record.get({ subject: address ?? '' }),
+    [record, address],
+    { contract: 'record', enabled: Boolean(address) },
+  );
 
   const standing = useContractResult<OnChainStanding>(
     () => record.get({ subject: address ?? '' }),
@@ -411,6 +437,60 @@ export const Standing = () => {
       ) : (
         <RecipientSignedOut onSignIn={() => setSignInOpen(true)} />
       )}
+
+      <div className="standing-section">
+        {subject && (
+          <>
+            <div className="standing-viewer">
+              <span className="standing-viewer__who">
+                <span className="standing-viewer__label">{lookedUp ? 'Viewing' : 'Your standing'}</span>
+                {lookedUp && <AddressChip address={lookedUp} />}
+              </span>
+              {lookedUp && (
+                <Button
+                  variant="secondary"
+                  onClick={() => setLookedUp(null)}
+                >
+                  {address ? 'Show my standing' : 'Clear lookup'}
+                </Button>
+              )}
+            </div>
+
+            {/* Keyed by subject so switching addresses starts a fresh read
+                rather than showing the previous one's figures. */}
+            <StandingPanel key={subject} subject={subject} />
+          </>
+        )}
+
+        <form className="standing-lookup" onSubmit={submitLookup}>
+          <div className="standing-lookup__copy">
+            <h2 className="standing-lookup__title">Look up a recipient</h2>
+            <p className="standing-lookup__desc">
+              Standing is portable, so the next funder can read any address&rsquo;s record before
+              underwriting it. Paste an address to see what the chain holds.
+            </p>
+          </div>
+          <div className="standing-lookup__row">
+            <div className="standing-lookup__field">
+              <Field
+                label="Recipient address"
+                value={lookupInput}
+                onChange={(event) => setLookupInput(event.target.value)}
+                placeholder="G…"
+                spellCheck={false}
+                autoComplete="off"
+              />
+            </div>
+            <Button
+              type="submit"
+              icon={<Search size={18} aria-hidden="true" />}
+              disabled={!canLookup}
+            >
+              Look up
+            </Button>
+          </div>
+        </form>
+      </div>
 
       <SignInSheet open={signInOpen} onClose={() => setSignInOpen(false)} />
     </div>

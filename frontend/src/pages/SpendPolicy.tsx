@@ -48,8 +48,26 @@ const SECONDS_PER_DAY = 86_400n;
 export const SpendPolicy = () => {
   const wallet = useWallet();
   const { policy } = useSoroban();
-  const signedIn = Boolean(wallet.address);
-  const address = wallet.address ?? '';
+
+  const [walletInput, setWalletInput] = useState('');
+  const [walletInputError, setWalletInputError] = useState<string | null>(null);
+  const [checkedWallet, setCheckedWallet] = useState<string | null>(null);
+  const target = checkedWallet ?? wallet.address ?? '';
+  const ownWallet = Boolean(wallet.address) && target === wallet.address;
+  const enabled = looksLikeAddress(target);
+
+  const [payeeInput, setPayeeInput] = useState('');
+  const [payeeInputError, setPayeeInputError] = useState<string | null>(null);
+  const [payee, setPayee] = useState<string | null>(null);
+
+  // --- Which wallet is being inspected / managed --------------------------
+  const [walletInput, setWalletInput] = useState('');
+  const walletError =
+    walletInput.trim() !== '' && !looksLikeAddress(walletInput.trim())
+      ? 'Enter a valid wallet address.'
+      : null;
+  const viewedWallet = walletError ? '' : walletInput.trim() || address;
+  const canRead = signedIn && viewedWallet !== '';
 
   // --- Which wallet is being inspected / managed --------------------------
   const [walletInput, setWalletInput] = useState('');
@@ -87,7 +105,7 @@ export const SpendPolicy = () => {
     success: 'Policy signer installed.',
   });
 
-  const loading = signedIn && (installedRead.loading || policyRead.loading);
+  const loading = enabled && (installedRead.loading || policyRead.loading);
   const installed = installedRead.data === true;
   const configured = policyRead.data !== null && !policyRead.error;
   const protectedFully = installed && configured;
@@ -280,7 +298,27 @@ export const SpendPolicy = () => {
         </p>
       </header>
 
-      {!signedIn && (
+      <form className="spend-policy__lookup" onSubmit={handleCheckWallet} noValidate>
+        <Field
+          label="Wallet to check"
+          value={walletInput}
+          onChange={(event) => setWalletInput(event.target.value)}
+          placeholder={wallet.address ?? 'G… or C…'}
+          hint={
+            wallet.address
+              ? 'Leave empty to check your own wallet.'
+              : 'A Stellar account or smart wallet address.'
+          }
+          error={walletInputError}
+          autoComplete="off"
+          spellCheck={false}
+        />
+        <Button type="submit" variant="secondary">
+          Check wallet
+        </Button>
+      </form>
+
+      {!enabled && (
         <div className="spend-policy__signin">
           <span className="spend-policy__signin-title">Sign in to check or manage a wallet</span>
           <span className="spend-policy__signin-body">
@@ -313,28 +351,42 @@ export const SpendPolicy = () => {
 
       {signedIn && loading && <Loading label="Checking the wallet's policy" />}
 
-      {signedIn && !loading && (
+      {enabled && !loading && (
         <>
-          {!protectedFully && !installTx.busy && (
-            <div role="alert" className="spend-policy__alert">
+          <p className="spend-policy__target">
+            {ownWallet ? 'Your wallet' : 'Wallet'}{' '}
+            <span className="numeric">{truncateAddress(target)}</span>
+          </p>
+
+          {policyRead.error ? (
+            <ErrorState error={policyRead.error} contract="policy" onRetry={policyRead.refetch} />
+          ) : (
+            <p
+              className={`spend-policy__summary spend-policy__summary--${summary.status}`}
+              role={summary.status === 'protected' ? undefined : 'alert'}
+            >
+              {summary.sentence}
+            </p>
+          )}
+
+          {ownWallet && summary.status === 'none' && !installTx.busy && (
+            <div className="spend-policy__alert">
               <span className="spend-policy__alert-text">
-                <b>{installed ? 'No spending rules configured' : 'No policy on this wallet'}</b>
+                <b>No policy on this wallet</b>
                 <span>
                   {installed
                     ? 'The policy signer is installed, but nothing limits what it may authorise yet. Configure the asset, cap and payees below before releasing a tranche.'
                     : 'Without it, Restricted mode has no restriction at all: released money can be sent anywhere. Set it up before releasing a tranche.'}
                 </span>
               </span>
-              {!installed && (
-                <button
-                  type="button"
-                  className="spend-policy__setup"
-                  onClick={handleSetUp}
-                  disabled={installTx.busy}
-                >
-                  Set up policy
-                </button>
-              )}
+              <button
+                type="button"
+                className="spend-policy__setup"
+                onClick={handleSetUp}
+                disabled={installTx.busy}
+              >
+                Set up policy
+              </button>
             </div>
           )}
 
@@ -364,7 +416,7 @@ export const SpendPolicy = () => {
 
             {protectedFully && policyData && (
               <div className="spend-policy__card">
-                <h2>Cap</h2>
+                <h2>Cap this period</h2>
                 <div aria-hidden="true" className="spend-policy__track">
                   <span style={{ width: `${Math.min(100, pct).toFixed(1)}%` }} />
                 </div>
@@ -567,13 +619,8 @@ export const SpendPolicy = () => {
           <p className="spend-policy__limitation">
             A policy constrains one signer, not the wallet. A recipient holding an unrestricted
             admin signer can authorise around it — genuine enforcement needs the wallet&rsquo;s
-            own signer limits, a deployment step this page cannot perform. This check only
-            confirms the policy signer is installed, which bounds a misconfiguration to one
-            tranche.
-          </p>
-
-          <p className="spend-policy__announce">
-            {installTx.phase === 'success' ? 'Policy signer installed.' : ''}
+            own signer limits, a deployment step this page cannot perform. Allocated mode
+            doesn&rsquo;t need this: money stays in escrow until the recipient chooses a payee.
           </p>
         </>
       )}
