@@ -34,6 +34,12 @@ export interface RecipientApplicationFixture {
   submittedLedger: number;
   votes: string[]; // stroops as decimal strings
   quorum: number; // reviewer quorum, capped at 16
+  /** Whether the application has been finalised into an award. */
+  finalized?: boolean;
+  /** Whether the application has been withdrawn. Withdrawn applications cannot be reviewed or finalised. */
+  withdrawn?: boolean;
+  /** True for a stand-in entry belonging to a sample programme. */
+  sample?: boolean;
 }
 
 export interface RecipientStandingFixture {

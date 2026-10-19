@@ -35,6 +35,16 @@ export interface VerifierAttestation {
   schema: string;
   ledger: number;
   used: boolean;
+  /**
+   * The 64-char hex of the attestation UID, used to construct the 32-byte
+   * Buffer for `attest.revoke`. Absent for fixture entries that have no
+   * real on-chain UID behind them (sample data).
+   */
+  rawUid?: string;
+  /** Whether the schema allows revocation. Absent = unknown (treat as false). */
+  revocable?: boolean;
+  /** Whether this attestation has already been revoked. */
+  revoked?: boolean;
 }
 
 export const FIXTURE_VERIFIER_QUEUE: VerifierQueueItem[] = [

@@ -18,6 +18,7 @@ import { formatAmount, validateAmount } from '../lib/amount';
 import { AmountField, Badge, Button, Field } from '../components/ui';
 import { ProgrammeParamNotice } from '../components/programme/ProgrammeParamNotice';
 import { ErrorPanel, PendingState, TransactionOutcome } from '../components/state/AsyncStates';
+import { AttestationRevoke } from '../components/verifier/AttestationRevoke';
 import { FIXTURE_REVIEW_APPLICANTS } from '../fixtures/reviewFixtures';
 import {
   FIXTURE_MY_ATTESTATIONS,
@@ -61,6 +62,7 @@ export const VerifierDashboard = () => {
   const [checked, setChecked] = useState(false);
   const [reference, setReference] = useState('');
   const [newlySigned, setNewlySigned] = useState<VerifierAttestation[]>([]);
+  const [revokedUids, setRevokedUids] = useState<ReadonlySet<string>>(() => new Set());
   const [signingId, setSigningId] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [applicantInput, setApplicantInput] = useState('');
@@ -205,10 +207,12 @@ export const VerifierDashboard = () => {
     });
 
     if (result !== null) {
-      const uid = `att_${result.toString('hex').slice(0, 12)}…${result.toString('hex').slice(-4)}`;
+      const rawHex = result.toString('hex');
+      const uid = `att_${rawHex.slice(0, 12)}…${rawHex.slice(-4)}`;
       setNewlySigned((prev) => [
         {
           uid,
+          rawUid: rawHex,
           programmeId: item.programmeId,
           programme: item.programme,
           subject: item.subject,
@@ -303,6 +307,10 @@ export const VerifierDashboard = () => {
     } finally {
       setConnecting(false);
     }
+  };
+
+  const handleRevoked = (uid: string) => {
+    setRevokedUids((prev) => new Set(prev).add(uid));
   };
 
   const signError = signTx.error ? explain(signTx.error, 'attest') : null;
@@ -650,22 +658,35 @@ export const VerifierDashboard = () => {
                 </div>
               ) : (
                 <ul className="verifier-page__signed">
-                  {mine.map((m) => (
-                    <li key={m.uid} className="verifier-signed">
-                      <div className="verifier-signed__row">
-                        <span className="verifier-signed__uid numeric" title={m.uid}>
-                          {truncateAddress(m.uid, 8, 6)}
+                  {mine.map((m) => {
+                    const isRevoked = m.revoked || revokedUids.has(m.uid);
+                    return (
+                      <li key={m.uid} className="verifier-signed">
+                        <div className="verifier-signed__row">
+                          <span className="verifier-signed__uid numeric" title={m.uid}>
+                            {truncateAddress(m.uid, 8, 6)}
+                          </span>
+                          <Badge tone={isRevoked ? 'neutral' : m.used ? 'accent' : 'neutral'}>
+                            {isRevoked
+                              ? 'Revoked'
+                              : m.used
+                                ? 'Used to release a tranche'
+                                : 'Not used yet'}
+                          </Badge>
+                        </div>
+                        <span className="verifier-signed__meta">
+                          {m.programme} · {truncateAddress(m.subject, 6, 4)} · {m.schema} · ledger{' '}
+                          {m.ledger.toLocaleString()}
                         </span>
-                        <Badge tone={m.used ? 'accent' : 'neutral'}>
-                          {m.used ? 'Used to release a tranche' : 'Not used yet'}
-                        </Badge>
-                      </div>
-                      <span className="verifier-signed__meta">
-                        {m.programme} · {truncateAddress(m.subject, 6, 4)} · {m.schema} · ledger{' '}
-                        {m.ledger.toLocaleString()}
-                      </span>
-                    </li>
-                  ))}
+                        {!isRevoked && (
+                          <AttestationRevoke
+                            attestation={{ ...m, revoked: isRevoked }}
+                            onRevoked={handleRevoked}
+                          />
+                        )}
+                      </li>
+                    );
+                  })}
                 </ul>
               )}
               <p className="verifier-page__sample-note">

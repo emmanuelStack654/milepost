@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { AwardCard } from './AwardCard';
 import { ApplyForm } from './ApplyForm';
 import { ApplicationTimelineList } from './ApplicationTimelineList';
 import type { RecipientAwardFixture, RecipientApplicationFixture } from '../../fixtures/recipientFixtures';
-import { explain } from '../../lib/errors';
+import { explain, explainCode } from '../../lib/errors';
 
 // Mock useAnnouncer so we can assert on announcements
 const mockAnnounce = vi.fn();
@@ -13,9 +13,77 @@ vi.mock('../../context/useAnnouncer', () => ({
   useAnnouncer: () => mockAnnounce,
 }));
 
+// --- Wallet + Soroban mocks for the Allocated spend flow --------------------
+// AwardCard renders AllocatedSpending for Allocated awards, which reads
+// allocation_of / is_payee and sends spend. Only Allocated awards invoke
+// these; the other mode and tranche tests are unaffected.
+
+const RECIPIENT = 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+const PAYEE     = 'GBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB';
+// A real (56-char C-prefixed) contract id so looksLikeContractId returns true.
+const REAL_PROGRAMME = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+
+const walletMocks = vi.hoisted(() => ({
+  address: RECIPIENT as string | null,
+  signTransaction: vi.fn(async () => ({
+    signedTxXdr: 'SIGNEDXDR==',
+    signerAddress: RECIPIENT,
+  })),
+}));
+
+vi.mock('../../context/useWallet', () => ({
+  useWallet: () => ({
+    address: walletMocks.address,
+    status: walletMocks.address ? 'connected' : 'disconnected',
+    network: 'TESTNET',
+    networkError: null,
+    expectedNetwork: 'Testnet',
+    connect: vi.fn(),
+    signTransaction: walletMocks.signTransaction,
+  }),
+}));
+
+function makeProgramme(opts: {
+  allocation?: bigint;
+  isPayee?: (addr: string) => boolean;
+  spendError?: string;
+  withdrawError?: string;
+} = {}) {
+  return {
+    allocation_of: vi.fn(async () => ({
+      result: opts.allocation ?? 10_000_000_000n,
+    })),
+    is_payee: vi.fn(async ({ payee }: { payee: string }) => ({
+      result: opts.isPayee ? opts.isPayee(payee) : true,
+    })),
+    spend: vi.fn(async () => ({
+      signAndSend: vi.fn(async () => {
+        if (opts.spendError) throw new Error(opts.spendError);
+        return {
+          result: { unwrap: () => (opts.allocation ?? 10_000_000_000n) - 1_000_000_000n },
+        };
+      }),
+    })),
+    withdraw: vi.fn(async () => ({
+      signAndSend: vi.fn(async () => {
+        if (opts.withdrawError) throw new Error(opts.withdrawError);
+        return { result: { unwrap: () => undefined } };
+      }),
+    })),
+  };
+}
+
+let programme = makeProgramme();
+
+vi.mock('../../context/useSoroban', () => ({
+  useSoroban: () => ({ programmeAt: () => programme }),
+}));
+
 describe('Recipient Issues Suite (#272, #273, #274, #275)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    walletMocks.address = RECIPIENT;
+    programme = makeProgramme();
   });
 
   describe('Issue #272 — Recipient: awards and tranche release', () => {
@@ -122,74 +190,136 @@ describe('Recipient Issues Suite (#272, #273, #274, #275)', () => {
   });
 
   describe('Issue #273 — Recipient: mode-specific spending', () => {
-    it('Allocated mode displays escrow and limits payee selection to verified payees', () => {
-      const allocatedAward: RecipientAwardFixture = {
-        programmeId: 'PROG-ALLOCATED',
-        programmeName: 'Vocational Grants',
-        recipient: 'GD4KQ2…2QXW',
-        granted: '30000000000',
-        released: '10000000000',
-        tranches: 3,
-        tranchesReleased: 1,
-        payee: null,
-        mode: 'Allocated',
-        updatedLedger: 4851002,
-        attestationReady: false,
-        condition: 'Monthly training verified',
-        escrow: '10000000000', // 1,000 USDC in escrow
-      };
+    const realAllocatedAward: RecipientAwardFixture = {
+      programmeId: REAL_PROGRAMME,
+      programmeName: 'Vocational Grants',
+      recipient: RECIPIENT,
+      granted: '30000000000',
+      released: '10000000000',
+      tranches: 3,
+      tranchesReleased: 1,
+      payee: null,
+      mode: 'Allocated',
+      updatedLedger: 4851002,
+      attestationReady: false,
+      condition: 'Monthly training verified',
+      escrow: '10000000000',
+    };
 
-      const customPayees = [
-        { address: 'GCPAY_PHARMACY_111', label: 'Verified payee · Pharmacy' },
-        { address: 'GCPAY_TRANSPORT_222', label: 'Verified payee · Transport co-op' },
-      ];
+    // A sample (non-contract) programme id — uses stand-in path.
+    const sampleAllocatedAward: RecipientAwardFixture = {
+      ...realAllocatedAward,
+      programmeId: 'PROG-ALLOCATED-SAMPLE',
+    };
 
+    it('Allocated sample shows the escrow and a stand-in send with Sample data tag', async () => {
       render(
         <MemoryRouter>
-          <AwardCard award={allocatedAward} payees={customPayees} />
+          <AwardCard award={sampleAllocatedAward} />
         </MemoryRouter>
       );
 
+      expect(await screen.findByText('Sample data')).toBeDefined();
       expect(screen.getByText(/Held for you in escrow/i)).toBeDefined();
-      expect(screen.getByText('Verified payee · Pharmacy')).toBeDefined();
-      expect(screen.getByText('Verified payee · Transport co-op')).toBeDefined();
-
-      const sendBtn = screen.getByRole('button', { name: /send to payee/i });
-      fireEvent.click(sendBtn);
-
-      expect(screen.getByText(/Sent to Pharmacy/i)).toBeDefined();
-      expect(mockAnnounce).toHaveBeenCalledWith('Payment sent from escrow to the verified payee.');
+      expect(screen.getByLabelText('Payee address')).toBeDefined();
     });
 
-    it('Allocated mode handles unverified payee error (error 30) through explain()', () => {
-      const allocatedAward: RecipientAwardFixture = {
-        programmeId: 'PROG-ALLOCATED-ERR',
-        programmeName: 'Vocational Grants',
-        recipient: 'GD4KQ2…2QXW',
-        granted: '30000000000',
-        released: '10000000000',
-        tranches: 3,
-        tranchesReleased: 1,
-        payee: null,
-        mode: 'Allocated',
-        updatedLedger: 4851002,
-        attestationReady: false,
-        condition: 'Monthly training verified',
-        escrow: '10000000000',
-      };
+    it('Allocated real: sends escrow to a verified payee, re-reads the allocation, and names the payee and amount', async () => {
+      programme = makeProgramme({ allocation: 10_000_000_000n, isPayee: (a) => a === PAYEE });
 
       render(
         <MemoryRouter>
-          <AwardCard award={allocatedAward} simulateUnverifiedPayeeError={true} />
+          <AwardCard award={realAllocatedAward} />
         </MemoryRouter>
       );
 
-      const sendBtn = screen.getByRole('button', { name: /send to payee/i });
-      fireEvent.click(sendBtn);
+      await screen.findByRole('button', { name: 'Check payee' });
 
-      const err30 = explain(30, 'program');
-      expect(screen.getByText(err30.message)).toBeDefined();
-      expect(screen.getByText(/program error 30/i)).toBeDefined();
+      fireEvent.change(screen.getByLabelText('Payee address'), { target: { value: PAYEE } });
+      fireEvent.click(screen.getByRole('button', { name: 'Check payee' }));
+      expect(await screen.findByText(/Verified — this payee can receive escrow/)).toBeDefined();
+
+      fireEvent.change(screen.getByLabelText('Amount'), { target: { value: '100' } });
+      fireEvent.blur(screen.getByLabelText('Amount'));
+      fireEvent.click(screen.getByRole('button', { name: 'Send to payee' }));
+
+      expect(await screen.findByText('Sent to payee')).toBeDefined();
+      expect(screen.getByText(/100\.00 USDC to GBBBBB/)).toBeDefined();
+      await waitFor(() => expect(programme.allocation_of).toHaveBeenCalledTimes(2));
+      expect(programme.spend).toHaveBeenCalledWith({
+        recipient: RECIPIENT,
+        payee: PAYEE,
+        amount: 1_000_000_000n,
+      });
+    });
+
+    it('Allocated real: refuses an unverified payee (error 30) before signing', async () => {
+      programme = makeProgramme({ isPayee: () => false });
+
+      render(
+        <MemoryRouter>
+          <AwardCard award={realAllocatedAward} />
+        </MemoryRouter>
+      );
+
+      await screen.findByRole('button', { name: 'Check payee' });
+      fireEvent.change(screen.getByLabelText('Payee address'), { target: { value: PAYEE } });
+      fireEvent.click(screen.getByRole('button', { name: 'Check payee' }));
+
+      const err30 = explainCode('program', 30);
+      expect(await screen.findByText(err30.message)).toBeDefined();
+      expect(screen.getByText(/program error 30/)).toBeDefined();
+      expect((screen.getByRole('button', { name: 'Send to payee' }) as HTMLButtonElement).disabled).toBe(true);
+      expect(programme.spend).not.toHaveBeenCalled();
+    });
+
+    it('Allocated real: refuses an amount above the allocation (InsufficientAllocation) inline', async () => {
+      programme = makeProgramme({ allocation: 10_000_000_000n, isPayee: () => true });
+
+      render(
+        <MemoryRouter>
+          <AwardCard award={realAllocatedAward} />
+        </MemoryRouter>
+      );
+
+      await screen.findByRole('button', { name: 'Check payee' });
+      fireEvent.change(screen.getByLabelText('Payee address'), { target: { value: PAYEE } });
+      fireEvent.click(screen.getByRole('button', { name: 'Check payee' }));
+      await screen.findByText(/Verified — this payee can receive escrow/);
+
+      fireEvent.change(screen.getByLabelText('Amount'), { target: { value: '2,000' } });
+      fireEvent.blur(screen.getByLabelText('Amount'));
+
+      expect(await screen.findByText(/More than your balance of 1,000\.00 USDC/)).toBeDefined();
+      expect((screen.getByRole('button', { name: 'Send to payee' }) as HTMLButtonElement).disabled).toBe(true);
+      expect(programme.spend).not.toHaveBeenCalled();
+    });
+
+    it('Allocated real: shows the sweep-window error (35) through explain()', async () => {
+      programme = makeProgramme({
+        isPayee: () => true,
+        spendError: 'Error(Contract, #35)',
+      });
+
+      render(
+        <MemoryRouter>
+          <AwardCard award={realAllocatedAward} />
+        </MemoryRouter>
+      );
+
+      await screen.findByRole('button', { name: 'Check payee' });
+      fireEvent.change(screen.getByLabelText('Payee address'), { target: { value: PAYEE } });
+      fireEvent.click(screen.getByRole('button', { name: 'Check payee' }));
+      await screen.findByText(/Verified — this payee can receive escrow/);
+
+      fireEvent.change(screen.getByLabelText('Amount'), { target: { value: '100' } });
+      fireEvent.blur(screen.getByLabelText('Amount'));
+      fireEvent.click(screen.getByRole('button', { name: 'Send to payee' }));
+
+      const err35 = explainCode('program', 35);
+      expect(await screen.findByText(err35.message)).toBeDefined();
+      expect(screen.getByText(/program error 35/)).toBeDefined();
+      expect(programme.spend).toHaveBeenCalled();
     });
 
     it('Restricted mode explains that the policy constrains one signer, not the wallet', () => {
@@ -387,6 +517,141 @@ describe('Recipient Issues Suite (#272, #273, #274, #275)', () => {
       expect(
         screen.getByText(/The award will be the median, not the lowest or the average\./i)
       ).toBeDefined();
+    });
+  });
+});
+
+  describe('Issue #276 — Recipient: withdraw an application', () => {
+    // A real (56-char C-prefixed) programme id — uses on-chain path.
+    const openApplication: RecipientApplicationFixture = {
+      programmeId: REAL_PROGRAMME,
+      programmeName: 'Vocational Training Stipends Q3',
+      phase: 'Review',
+      requested: '12000000000',
+      submittedLedger: 4704410,
+      votes: ['9000000000'],
+      quorum: 3,
+    };
+
+    // A sample (non-contract) programme id — stand-in path.
+    const sampleApplication: RecipientApplicationFixture = {
+      ...openApplication,
+      programmeId: 'CDV7VOCATIONALCOHORT3PL5QZ2WM8RT4HX6KJ9A3FC',
+      sample: true,
+    };
+
+    it('shows the withdraw button on a non-finalised, non-withdrawn application', () => {
+      render(
+        <MemoryRouter>
+          <ApplicationTimelineList applications={[openApplication]} />
+        </MemoryRouter>
+      );
+      expect(screen.getByRole('button', { name: /withdraw application/i })).toBeDefined();
+    });
+
+    it('does not show the withdraw button on a finalised application', () => {
+      render(
+        <MemoryRouter>
+          <ApplicationTimelineList applications={[{ ...openApplication, finalized: true }]} />
+        </MemoryRouter>
+      );
+      expect(screen.queryByRole('button', { name: /withdraw application/i })).toBeNull();
+    });
+
+    it('does not show the withdraw button on an already-withdrawn application', () => {
+      render(
+        <MemoryRouter>
+          <ApplicationTimelineList applications={[{ ...openApplication, withdrawn: true }]} />
+        </MemoryRouter>
+      );
+      expect(screen.queryByRole('button', { name: /withdraw application/i })).toBeNull();
+    });
+
+    it('asks for confirmation before withdrawing', () => {
+      render(
+        <MemoryRouter>
+          <ApplicationTimelineList applications={[openApplication]} />
+        </MemoryRouter>
+      );
+      fireEvent.click(screen.getByRole('button', { name: /withdraw application/i }));
+      expect(screen.getByText(/This cannot be undone/i)).toBeDefined();
+      expect(screen.getByRole('button', { name: /yes, withdraw/i })).toBeDefined();
+      expect(screen.getByRole('button', { name: /cancel/i })).toBeDefined();
+    });
+
+    it('cancel hides the confirmation step without withdrawing', () => {
+      render(
+        <MemoryRouter>
+          <ApplicationTimelineList applications={[openApplication]} />
+        </MemoryRouter>
+      );
+      fireEvent.click(screen.getByRole('button', { name: /withdraw application/i }));
+      fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+
+      expect(screen.queryByText(/This cannot be undone/i)).toBeNull();
+      expect(screen.getByRole('button', { name: /withdraw application/i })).toBeDefined();
+      expect(programme.withdraw).not.toHaveBeenCalled();
+    });
+
+    it('real: calls programme.withdraw, shows success, and hides the action', async () => {
+      render(
+        <MemoryRouter>
+          <ApplicationTimelineList applications={[openApplication]} />
+        </MemoryRouter>
+      );
+      fireEvent.click(screen.getByRole('button', { name: /withdraw application/i }));
+      fireEvent.click(screen.getByRole('button', { name: /yes, withdraw/i }));
+
+      expect(await screen.findByText(/Application withdrawn/i)).toBeDefined();
+      expect(programme.withdraw).toHaveBeenCalledWith({ applicant: RECIPIENT });
+      expect(mockAnnounce).toHaveBeenCalledWith('Application withdrawn.');
+
+      // Withdraw button is gone once confirmed.
+      expect(screen.queryByRole('button', { name: /withdraw application/i })).toBeNull();
+    });
+
+    it('sample: uses the stand-in path and shows success without calling the contract', async () => {
+      render(
+        <MemoryRouter>
+          <ApplicationTimelineList
+            applications={[sampleApplication]}
+          />
+        </MemoryRouter>
+      );
+      fireEvent.click(screen.getByRole('button', { name: /withdraw application/i }));
+      fireEvent.click(screen.getByRole('button', { name: /yes, withdraw/i }));
+
+      expect(await screen.findByText(/Application withdrawn/i)).toBeDefined();
+      expect(programme.withdraw).not.toHaveBeenCalled();
+    });
+
+    it('surfaces AlreadyFinalized (error 13) through explain() when the application was settled concurrently', async () => {
+      programme = makeProgramme({ withdrawError: 'Error(Contract, #13)' });
+
+      render(
+        <MemoryRouter>
+          <ApplicationTimelineList applications={[openApplication]} />
+        </MemoryRouter>
+      );
+      fireEvent.click(screen.getByRole('button', { name: /withdraw application/i }));
+      fireEvent.click(screen.getByRole('button', { name: /yes, withdraw/i }));
+
+      const err13 = explainCode('program', 13);
+      expect(await screen.findByText(err13.message)).toBeDefined();
+    });
+
+    it('shows withdrawn state in the timeline steps when already withdrawn', () => {
+      render(
+        <MemoryRouter>
+          <ApplicationTimelineList
+            applications={[{ ...openApplication, withdrawn: true }]}
+          />
+        </MemoryRouter>
+      );
+      expect(
+        screen.getByText(/Withdrawn — you cancelled this application/i)
+      ).toBeDefined();
+      expect(screen.getByText('No award will be set.')).toBeDefined();
     });
   });
 });
